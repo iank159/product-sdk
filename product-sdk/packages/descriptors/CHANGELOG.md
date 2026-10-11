@@ -1,5 +1,100 @@
 # @parity/product-sdk-descriptors
 
+## 0.13.0
+
+### Minor Changes
+
+- 41d7ee8: **Re-pin the Paseo Asset Hub and Paseo individuality descriptors against the live 3003000 runtimes.**
+
+  Both chains upgraded, so the bundled metadata no longer matched them. The genesis hashes are
+  unchanged, so connections keep working. What changed is what the descriptors can decode.
+
+  Two changes break direct descriptor users, and neither affects a caller that goes through
+  `@parity/product-sdk-nfts`, which was updated in the same release.
+
+  `NftCredits.NftClaimCreditAwards` on the People chain is now keyed `(block, chunk)` rather than
+  by block, with at most `CHUNKS_PER_TREE` chunks a block. A read by block alone no longer
+  compiles.
+
+  `NftClaims.ClaimedCredits` on Asset Hub is gone. Its replacement is `NftClaims.ClaimedLeaves`,
+  one bitmap per tree block with bit `leaf_index` set for each claimed leaf, least significant bit
+  first. The bitmap outlives the tree, so a claim still reads as claimed after the tree is swept.
+
+  New in the Asset Hub descriptor and read by the nfts package: `NftClaimsApi.preview_mints`.
+
+- 41d7ee8: **Re-pin `paseo-individuality` and `previewnet-individuality` to spec 3003000 (#242).**
+
+  Both chains now pin codeHash `0x90d0e268…43744`. Previewnet was also re-genesised, from `0xf720c28f…35218` to `0x55e3e689…249e9`, so the previous descriptor fails to connect to it with `GenesisMismatchError`. Paseo keeps genesis `0x4a2b5b73…5ad48`.
+
+  **Minor rather than patch, because surface is removed.** Both chains changed the same way.
+
+  | Kind      | Removed                                                                                                                                                                                                                          | Added                                                                                                                                                           |
+  | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | Storage   | `NftCredits.NftClaimCreditAwardBlocks`, `NftCredits.PendingNftClaimCreditRootInfo`                                                                                                                                               | `NftCredits.CreditBuffers`, `NftCredits.CreditBufferCursor`, `NftCredits.RetainedCreditTreeBlocks`, `NftCredits.RootExpiries`, `Coinage.RecyclersUnloadedCount` |
+  | Constants | `NftCredits.MaxCreditsPerBlock`, `NftCredits.MaxRetainedAwardBlocks`, `Coinage.MaxFreeUnloadTokensPerTimePeriod`, `Coinage.UnloadTokenAllowancePerTimePeriodForLitePeople`, `Coinage.UnloadTokenAllowancePerTimePeriodForPeople` | `NftCredits.ClaimsChainTreeTtl`, `NftCredits.MaxRetainedCreditTrees`, `NftCredits.MaxRootsPerSweep`, `NftCredits.MaxTreeDeletionsPerMessage`                    |
+  | Calls     | none                                                                                                                                                                                                                             | `NftCredits.receive_tree_deletions`, `NftCredits.sweep_expired_roots`, `Score.force_set_attendance`                                                             |
+
+  `NftCredits.NftClaimCreditAwards` keeps its name but is now keyed by block and chunk index rather than by block alone, so a read written against the old key no longer typechecks. The `NftCreditsApi` runtime APIs answer the same questions and also serve the Merkle proof a claim needs.
+
+  `@parity/product-sdk-chain-client` needs no entry. It reads `.genesis` off the imported descriptor, so only its in-source test restated the previewnet hash.
+
+## 0.12.0
+
+### Minor Changes
+
+- a85b489: **Re-pin every drifting chain (#242), including five that were re-genesised.**
+
+  The bundled descriptors addressed chains that no longer exist. Access is gated on the genesis
+  hash, so a stale genesis fails at connection with `GenesisMismatchError` before any storage read.
+  A stale `codeHash` only means decoding against an old metadata snapshot; a stale genesis means
+  addressing a chain that is not there.
+
+  | Chain                      | Old genesis        | New genesis        |
+  | -------------------------- | ------------------ | ------------------ |
+  | `paseo-individuality`      | `0x89a63b11…5440f` | `0x4a2b5b73…5ad48` |
+  | `previewnet-individuality` | `0x34999c29…5d220` | `0xf720c28f…35218` |
+  | `paseo-asset-hub`          | `0x23e730eb…a2ca6` | `0x4349b00e…`      |
+  | `previewnet-asset-hub`     | `0x627f5441…29659` | `0xc27c8bf3…`      |
+  | `previewnet-bulletin`      | `0x1144acd2…04e89` | `0xea9158d7…`      |
+
+  `devnet-asset-hub`, `devnet-individuality`, `kusama-asset-hub`, `paseo-bulletin` and
+  `polkadot-asset-hub` kept their genesis and took a fresh `codeHash` only. All eleven chains
+  matched their live runtimes when this was cut; codeHash pins drift on their own schedule, tracked
+  in #242.
+
+  **Minor rather than patch, because surface is removed**, which on 0.x signals a breaking change.
+  Check this before upgrading; a green `pnpm typecheck` here does not clear consumers.
+
+  | Chain                      | Removed                                                 | Added                                                                                    |
+  | -------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+  | `paseo-individuality`      | pallet `StorageInitialization`, `Score.Suffix` constant | pallets `NetworkSuffix`, `Parameters`, `AssetConversion`, `PoolAssets`, `PeopleAirdrops` |
+  | `previewnet-individuality` | `Score.Suffix` constant                                 | pallet `NetworkSuffix`                                                                   |
+  | `paseo-asset-hub`          | `AsRingAlias` transaction extension                     | pallet `NetworkSuffix`                                                                   |
+  | `previewnet-asset-hub`     | none                                                    | pallet `NetworkSuffix`                                                                   |
+  | `polkadot-asset-hub`       | none                                                    | pallet `Psm`                                                                             |
+
+  Two consequences worth reading if you use the individuality surface.
+
+  **The network suffix moved from a constant to storage on both individuality chains.** Neither
+  publishes `Score.Suffix` any more, so `readScoreContext` and `readLiteSignUpRequirement` now take
+  the `NetworkSuffixChain` overload and read it at a pinned block. A caller-supplied `tld` still wins
+  where you pass one. Previewnet's own suffix changed with it, from `test` to `testnet`, so its
+  `Score.score_context` moved from `0xa02ef8d9…` to `0x643d4ff6…`. Paseo's is unchanged at
+  `0x99f1920e…`. If you derived a context from a hardcoded `test`, it no longer matches previewnet.
+
+  **`paseo-individuality` gained `PeopleAirdrops`.** The airdrop read surface now has a chain that
+  carries the pallet, where before only previewnet did.
+
+  `@parity/product-sdk-cloud-storage` takes a minor because it now addresses a different chain:
+  `CloudStorageNetworks.previewnet.genesisHash` restated the hash by hand and was pointing at a
+  previewnet Bulletin that no longer exists. All three entries now read `.genesis` off the descriptor
+  they already sit beside, so their declared type widens from the literal hash to `` `0x${string}` ``.
+  Assignment is unaffected; only an annotation naming the literal breaks. Do the same with any hash
+  you pinned yourself, since these chains are re-genesised periodically.
+
+  `@parity/product-sdk-chain-client` needs no entry. It reads `.genesis` off the imported descriptor,
+  so only its in-source tests restated the hashes, and its published output is unchanged.
+
 ## 0.11.0
 
 ### Minor Changes

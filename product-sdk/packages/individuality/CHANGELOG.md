@@ -1,5 +1,225 @@
 # @parity/product-sdk-individuality
 
+## 0.8.0
+
+### Minor Changes
+
+- 133451f: Let a read address its block the way PAPI's `at` does. `readSignUpFunds`,
+  `readGameSignUpRequirement`, `readLiteSignUpRequirement` and `readAirdropDraw`
+  take `at: "finalized" | "best" | BlockSnapshot`. Every nfts read that took a
+  snapshot as `at` takes the same, and `getClaims` also takes it as
+  `individualityAt` for its People read. `"finalized"` stays the default.
+
+  The raw clients these reads take, `raw.individuality` and `raw.assetHub`, are
+  now `BlockSource`, the part of PAPI's `PolkadotClient` they use, so they name
+  `getBestBlocks` next to `getFinalizedBlock`. Every `PolkadotClient` has both, so `fromPapi` and
+  `getChainAPI` callers change nothing. A hand-built raw client needs
+  `getBestBlocks` added. `FinalizedBlockSource` stays as a deprecated alias.
+  `BlockSnapshot` names the pinned block, and `FinalizedSnapshot` stays as an
+  alias of it.
+
+## 0.7.0
+
+### Minor Changes
+
+- 41d7ee8: **Hash an NFT claim credit offline: `creditHash`.**
+
+  `creditHash({ gameIndex, round, attester, attestee })` returns the credit one attestation awards, the preimage the game pallet hashes, pinned against the two vectors of the pallet `nft_claim_credit_spec` test. `readCreditCandidates` uses it to name the credits a player could earn.
+
+  Reading the claims the chain has awarded, with the proof a mint needs, belongs to `@parity/product-sdk-nfts`, see #329.
+
+- 41d7ee8: **Mint airdrop VRFs without a host: `localAirdropVrfSigner` in a new `testing` subpath.**
+
+  `localAirdropVrfSigner(secretKey)` from `@parity/product-sdk-individuality/testing` is an `AirdropVrfSigner` over an sr25519 secret key held in memory, so a script can call `mintAccountAirdropVrfs` and sign up for the game with no host. It signs the transcript the airdrop pallet verifies, which `vrf.sign` from `@scure/sr25519` cannot express, and refuses a transcript whose `signer` item names another key. Its signatures are pinned against the VRF of `@scure/sr25519` on the one transcript both can express.
+
+  It is for development only and never ships from the main entry. A hosted product keeps signing through the host. `@parity/product-sdk/testing` re-exports it.
+
+  The package now depends on `@noble/curves` and `@scure/sr25519`, which only the `testing` entry imports.
+
+- 41d7ee8: **Build the game report and offboard calls: `reportTx` and `offboardTx`.**
+
+  `reportTx(chain, { fullReport })` builds `Game.report` from `"Person" | "NotPerson"` votes, one list per round in group order with the reporter left out. `offboardTx(chain)` builds `Game.offboard`. Both return the unsigned PAPI transaction, like `claimPrizeTx`, so submission stays with `@parity/product-sdk-tx`.
+
+  Sign both with `withScoreParticipant(signer)`, which dispatches them fee-free from an account with no balance. The `signUpWithAccountTx` docs now say the same origin serves a returning player signing up again.
+
+  Offboarding a `Recognized` player suspends their personhood permanently, which the `offboardTx` docs spell out.
+
+- 41d7ee8: **Expose the participant record behind a resolved personhood state.**
+
+  The `Resolved` arm of `PersonhoodResult` now carries `participant`, the decoded `Score.Participants` record the state was derived from, or `null` when the account has none. It holds the fields the state and the metrics summarize away: the streak, the attendance history, the recognition, `lastAttendedGame` and whether personhood was reached, so a product no longer reads the entry a second time to get them.
+
+  `PersonhoodParticipant` also gains `hasEverReachedPersonhood`, which stays `true` after the score falls back below the threshold, decoded from the new `has_ever_reached_personhood` member of `RawParticipant`.
+
+  **Breaking for implementors.** `participant` is a required member of the `Resolved` arm, `hasEverReachedPersonhood` of `PersonhoodParticipant`, and `has_ever_reached_personhood` of `RawParticipant`, so hand-built values and test doubles must add them. Callers are unaffected, and values decoded by `toPersonhoodParticipant` from a real `Score.Participants` read already carry them.
+
+- 41d7ee8: **Read the roster of the running game: player indices, group members, communication identifiers and credit candidates.**
+
+  - `readPlayerIndices(chain, { player })` reads `Game.PlayerToIndex`, one index per round.
+  - `readGroupMembers(chain, { round, ownIndex, playerCount, maxGroupSize })` resolves every occupied seat of one group through `Game.IndexToPlayer`.
+  - `readCommunicationIdentifier(chain, { account })` reads the 65-byte key an account registered at sign-up from `Game.CommunicationIdentifiers`.
+  - `readCreditCandidates(chain, { attestee })` reads the game and the roster at one block and names every credit the attestee could earn, one per co-player per round, hashed with `creditHash`. Matching them against the claims `@parity/product-sdk-nfts` reads, see #329, separates the awarded credits from the pending ones.
+  - `numberOfGroups` and `groupSeats` are the pure group arithmetic of the pallet, empty seats included.
+
+  The roster exists from the end of the shuffle until `PlayerProcess::Step2ClearIndices` drains it, so `CurrentGame` now carries `playerCount`, read from the game state, which is `null` outside that window. Read the game first, and cache the candidates if they have to outlive it.
+
+  **Breaking for implementors.** `playerCount` is a required member of the exported `CurrentGame` interface, so hand-built values and test doubles must add it. Callers are unaffected.
+
+- 41d7ee8: **Read what a game sign-up costs: `readSignUpFunds`.**
+
+  `readSignUpFunds(chain, { account, tx })` returns the parts of the cost at one pinned finalized block: `deposit` from `Game.PlayDepositAmount`, the free balance from `System.Account`, and `estimatedFee` for the sign-up transaction passed as `tx`, or `null` without one. It also returns the token `decimals` and `symbol` the chain spec publishes, `null` where it publishes none. How much headroom to demand on top is product policy, so no total is given.
+
+  The deposit applies to a new or archived player only, and the fee is refunded on success but needed up front. Neither applies under `withScoreParticipant`.
+
+  The estimate passes `VerifyMultiSignature` as `Disabled`. Estimating a sign-up on the individuality chains with plain `getEstimatedFees` fails with `Missing VerifyMultiSignature signed extension`, because the host fills that extension when it signs.
+
+- 41d7ee8: **Watch the game, a registration and a participant record at the best block.**
+
+  - `watchCurrentGame(chain, onValue, onError)` follows `Game.Game`, decoded by `toCurrentGame`, and is `null` between games.
+  - `watchPlayer(chain, { player }, onValue, onError)` follows `Game.Players`, and is `null` for a player with no record.
+  - `watchParticipant(chain, { player }, onValue, onError)` follows `Score.Participants`, decoded by `toPersonhoodParticipant`.
+
+  Each returns the function that stops it, and passes the best block the value was read at. A value that fails to decode goes to `onError` and the watch keeps running, while a failed subscription goes to `onError` as a `ProductIndividualityError` and ends. PAPI emits once per best block whether or not the value changed, so a watch only delivers a value that differs from the last.
+
+  The contracts are `CurrentGameWatchChain`, `PlayerWatchChain` and `ParticipantWatchChain`, which a client from `getChainAPI` or `fromPapi` satisfies as it is.
+
+## 0.6.0
+
+### Minor Changes
+
+- a0fcb48: **Product accounts derive the RFC-0022 way.** The previous derivation predated RFC-0022 and matched no shipping host, so every product-account address the SDK produced was wrong. It failed closed: the wallet resolves an account selector rather than a key, so it signed as the correct account, but the wrong key drove the nonce lookup and everything else PAPI computes around the signature, and it is the address `packages/auth` displayed.
+
+  A product account sits at `//product//{productId}/{derivationIndex}`. The two `//product//{productId}` junctions are **hard**. Hard junctions cannot be reproduced from a public key, so the old approach — three soft junctions from `session.rootAccountId` — could not have been right for any host. The subtree public key must come from the Account Holder.
+
+  Canonical implementation is `host_logic/product_account.rs` in host-rust-core, mirrored by Android `DerivationPaths.kt` and iOS `DerivationIndex32.swift`. `packages/keys/src/product-account.test.ts` now pins the derivation against the host's own cross-host vector from `truapi-server/tests/wasm_crypto_vectors.rs`, rather than against fixtures generated from our own implementation.
+
+  **Every product-account address changes.** Anything keyed to an address this SDK derived before — funds, allowances, statement-store entries, on-chain registrations — belongs to an account no host will sign for and is stranded. Check before upgrading.
+
+  **Breaking API changes:**
+
+  - `deriveProductAccountPublicKey(productSubtreePublicKey, derivationIndex)` replaces `(parentPublicKey, productId, derivationIndex)`. The index is now a tagged `DerivationIndex` (`{ tag: "Index", value }` or `{ tag: "Raw", value }`), matching the host's own selector.
+  - `createChainCode` is **removed**. It encoded junctions that are now hard, and the SDK never derives a hard junction from a public key.
+  - `createSessionSigner`, `createSessionSignerForAccount` and `deriveProductPublicKey` return promises. Add `await`.
+  - All three, plus the new `getProductSubtreePublicKey`, take an optional trailing `ProductSubtreeOptions` (`{ appId?, storageDir? }`) to relocate the cache.
+
+  **The first derivation per product costs one round trip to the paired wallet.** `session.getProductSubtree(productId)` is consent-free, so it raises no dialog, but it does need the phone reachable. The result is cached in memory and on disk (`{appId}_ProductSubtrees.json`, mode 0600, keyed by session and product), so only a cold cache reaches the wallet. Pass `ProductAccountRef.publicKey` to skip the fetch entirely, or call `getProductSubtreePublicKey` up front to warm the cache before going offline.
+
+  There is deliberately no fallback to the old derivation, or to the wallet's selected account, when the fetch fails: both produce a valid signature over the wrong address, which is the defect being fixed.
+
+  **New in `@parity/product-sdk-utils`:** `derivationIndexBytes(index)` and the `DerivationIndex` type — the RFC-0022 32-byte selector expansion, now shared instead of written once per package. `@parity/product-sdk-individuality`'s `contextSuffixBytes` delegates to it, and is unchanged for callers: same `ContextSuffix` type, same `ProductIndividualityError`, same message text.
+
+  Requires `@novasamatech/host-papp` 0.10.0 or later for `getProductSubtree`.
+
+### Patch Changes
+
+- Updated dependencies [a0fcb48]
+  - @parity/product-sdk-utils@0.2.0
+
+## 0.5.0
+
+### Minor Changes
+
+- a85b489: **`buildLiteAliasBindTx` encodes the lite sign-up's bind leg entirely client-side.**
+
+  `PeopleLite.set_alias_account(account, valid_at_block)` under
+  `PeopleLiteAuth::AsLiteAliasWithProof` is an unsigned V5 _general_ extrinsic —
+  origin `None`, no signature — so it cannot ride a `PolkadotSigner`, and until
+  now the only way to assemble it was the host's `createTransaction`. With the
+  extension pipeline read from the chain's own metadata the SDK now builds the
+  whole extrinsic itself: every extra takes the value a general transaction needs
+  (`RestrictOrigins` enabled, `VerifyMultiSignature` disabled, immortal era,
+  zero nonce and tip, every origin `Option` slot `None`), the ring-VRF proof is
+  requested over the implication after `PeopleLiteAuth` — never chosen by the
+  caller — and the result is finished bytes for any raw submit, plus the proof's
+  ring coordinates for logging. `valid_at_block` is the chain's best block at
+  build time; `account` is a plain call parameter, which is what lets the
+  personhood product vouch for another product's account.
+
+  ```ts
+  const { transaction } = await buildLiteAliasBindTx(chain, {
+    account,
+    createProof: (message) =>
+      accounts.createRingVRFProof(
+        liteKeyHandle,
+        scoreContext,
+        litePeopleRing(genesis),
+        message
+      ),
+  });
+  await client.submit(`0x${bytesToHex(transaction)}`);
+  ```
+
+  The byte layout (`compact(len) ++ 0x45 ++ extensionVersion ++ extras ++ call`)
+  reproduces the encoding verified live on previewnet (spec 1000036) as the first
+  of the two lite sign-up transactions, and the tests pin it byte for byte
+  against the previewnet and paseo metadata. Chains whose `PeopleLiteAuth`
+  predates the deployed field list (devnet) are a loud error, not a plausible
+  wrong encoding. Nothing here chooses a chain, a product id or a context: run
+  `readScoreContext` first and stop on `NotProductDerived`, and skip the leg when
+  `PeopleLite.AccountToAlias` already holds the binding.
+
+  Two paths now reach this leg: `withLiteAlias({ tag: "AliasWithProof" })` has the
+  host assemble the envelope, and this builder assembles it client-side. Prefer
+  the builder unless you want the host to own the envelope, because it removes the
+  dependency on per-host `createTransaction` behaviour. Both remain supported.
+
+- a85b489: **The free lite sign-up: `readLiteSignUpRequirement` decides, `signUpWithLiteInviteTx` builds.**
+
+  `Game.sign_up_with_account_lite_invite(account, identifier_key, airdrops)` is the
+  `Pays::No`, deposit-free game sign-up a lite person's bound account submits —
+  signed by that account under `withLiteAlias({ tag: "AliasWithAccount" })`.
+  `signUpWithLiteInviteTx(chain, { account, identifierKey, airdrops, airdropsScheduled })`
+  builds it unsigned with the same width and count guards as the account sign-up.
+
+  `readLiteSignUpRequirement(chain, { account, liteMemberKey?, tld? })` is
+  `readGameSignUpRequirement` plus the lite gates, all at one pinned block. Its
+  blockers are the new `LiteSignUpBlocker` — a union of the existing
+  `SignUpBlocker` (which is unchanged, so exhaustive consumers of the account read
+  keep compiling) and nine lite arms: `AliasNotBound` (the proof-authorized
+  `PeopleLite.set_alias_account` bind leg has not run), `AliasBoundElsewhere` (the
+  binding exists outside `Score.score_context`), `StaleAlias` (the binding was
+  proven at a ring revision older than `Members.Root`, which the signed leg
+  rejects as `Custom(172)`), `AnotherAccountInvited` (the forever
+  `Game.LiteInvites` pin names a different account — carried in the blocker so a
+  UI can say which), `AlreadyPlaying` (a `Game.Players` entry exists, which
+  `sign_up_inner` rejects for an invited sign-up whatever its `registered` flag
+  says, so a returning player uses `signUpWithAccountTx`),
+  `AccountIsALitePerson` (the account is itself a lite person),
+  `AccountIsAStatementAccount` (the account is some alias's statement account,
+  which `sign_up_inner` rejects before it reaches either of the gates above),
+  `NotLiteMember` (the supplied member key is not an `Included` lite ring
+  member), and `ContextNotProductDerived` (the chain's score context is not
+  product-derived, so no stock host can mint the proof). Every lite arm blocks the
+  sign-up itself; the draw-only split carries over from the account read
+  unchanged.
+
+  ```ts
+  const req = await readLiteSignUpRequirement(chain, {
+    account,
+    liteMemberKey,
+  });
+  if (req.ok && req.value.canSignUp) {
+    const tx = signUpWithLiteInviteTx(chain, {
+      account,
+      identifierKey,
+      airdrops,
+    });
+    await submitAndWatch(
+      tx,
+      withLiteAlias(signer, { tag: "AliasWithAccount" })
+    );
+  }
+  ```
+
+  The new `LiteSignUpChain` contract (`PeopleLite.AccountToAlias`,
+  `PeopleLite.LitePeople`, `Game.LiteInvites`, `Game.StmtAccountToAlias`, `Members.Members`,
+  `Members.Root`, the sign-up call) is satisfied by paseo and previewnet; devnet predates it.
+
+  The read also resolves the score context, so it carries the same suffix
+  overloads as `readScoreContext`: previewnet resolves it from `Score.Suffix`,
+  and paseo publishes no suffix at all, so it needs `tld`. Passing a client that
+  cannot resolve one, with no `tld`, does not compile. TLDs, product ids and the
+  65-byte communication key stay caller-supplied throughout.
+
 ## 0.4.0
 
 ### Minor Changes
